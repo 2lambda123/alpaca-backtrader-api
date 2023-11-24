@@ -1,22 +1,30 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
-
+import os
 import collections
-from datetime import datetime, timedelta
+import time
+from enum import Enum
+import traceback
+
+from datetime import datetime, timedelta, time as dtime
 from dateutil.parser import parse as date_parse
 import time as _time
+import exchange_calendars
 import threading
 import asyncio
 
 import alpaca_trade_api as tradeapi
+from alpaca_trade_api.rest import TimeFrame
+from alpaca_trade_api.stream import Stream
 import pytz
 import requests
 import pandas as pd
 
 import backtrader as bt
-from alpaca_trade_api.polygon.entity import NY
 from backtrader.metabase import MetaParams
 from backtrader.utils.py3 import queue, with_metaclass
+
+NY = 'America/New_York'
 
 
 # Extend the exceptions to support extra cases
@@ -84,6 +92,18 @@ class API(tradeapi.REST):
         return None
 
 
+class Granularity(Enum):
+    Ticks = "ticks"
+    Daily = "day"
+    Minute = "minute"
+
+
+class StreamingMethod(Enum):
+    AccountUpdate = 'account_update'
+    Quote = "quote"
+    MinuteAgg = "minute_agg"
+
+
 class Streamer:
     conn = None
 
@@ -93,9 +113,10 @@ class Streamer:
             api_key='',
             api_secret='',
             instrument='',
-            method='',
+            method: StreamingMethod = StreamingMethod.AccountUpdate,
             base_url='',
-            data_stream='',
+            data_url='',
+            data_feed='iex',
             *args,
             **kwargs):
         try:
@@ -103,60 +124,50 @@ class Streamer:
             asyncio.get_event_loop()
         except RuntimeError:
             asyncio.set_event_loop(asyncio.new_event_loop())
-        self.data_stream = data_stream
-        self.conn = tradeapi.StreamConn(api_key,
-                                        api_secret,
-                                        base_url,
-                                        data_stream=self.data_stream)
+
+        self.conn = Stream(api_key,
+                           api_secret,
+                           base_url,
+                           data_stream_url=data_url,
+                           data_feed=data_feed)
         self.instrument = instrument
         self.method = method
         self.q = q
-        self.conn.on('authenticated')(self.on_auth)
-        self.conn.on(r'Q.*')(self.on_quotes)
-        self.conn.on(r'account_updates')(self.on_account)
-        self.conn.on(r'trade_updates')(self.on_trade)
 
     def run(self):
-        channels = []
-        if not self.method:
-            channels = ['trade_updates']  # 'account_updates'
-        else:
-            if self.data_stream == 'polygon':
-                maps = {"quote": "Q."}
-            elif self.data_stream == 'alpacadatav1':
-                maps = {"quote": "alpacadatav1/Q."}
-            channels = [maps[self.method] + self.instrument]
+        if self.method == StreamingMethod.AccountUpdate:
+            self.conn.subscribe_trade_updates(self.on_trade)
+        elif self.method == StreamingMethod.MinuteAgg:
+            self.conn.subscribe_bars(self.on_agg_min, self.instrument)
+        elif self.method == StreamingMethod.Quote:
+            self.conn.subscribe_quotes(self.on_quotes, self.instrument)
 
+        # this code runs in a new thread. we need to set the loop for it
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        self.conn.run(channels)
-
-    # Setup event handlers
-    async def on_auth(self, conn, stream, msg):
-        pass
+        self.conn.run()
 
     async def on_listen(self, conn, stream, msg):
         pass
 
-    async def on_quotes(self, conn, subject, msg):
-        msg._raw['time'] = msg.timestamp.to_pydatetime().timestamp()
+    async def on_quotes(self, msg):
+        msg._raw['time'] = msg.timestamp
         self.q.put(msg._raw)
 
-    async def on_agg_sec(self, conn, subject, msg):
+    async def on_agg_min(self, msg):
+        msg._raw['time'] = msg.timestamp
+        self.q.put(msg._raw)
+
+    async def on_account(self, msg):
         self.q.put(msg)
 
-    async def on_agg_min(self, conn, subject, msg):
-        self.q.put(msg)
-
-    async def on_account(self, conn, stream, msg):
-        self.q.put(msg)
-
-    async def on_trade(self, conn, stream, msg):
+    async def on_trade(self, msg):
         self.q.put(msg)
 
 
 class MetaSingleton(MetaParams):
     '''Metaclass to make a metaclassed class a singleton'''
+
     def __init__(cls, name, bases, dct):
         super(MetaSingleton, cls).__init__(name, bases, dct)
         cls._singleton = None
@@ -191,7 +202,6 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         ('key_id', ''),
         ('secret_key', ''),
         ('paper', False),
-        ('usePolygon', False),
         ('account_tmout', 10.0),  # account balance refresh timeout
         ('api_version', None)
     )
@@ -200,7 +210,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
     _ENVPRACTICE = 'paper'
     _ENVLIVE = 'live'
     _ENV_PRACTICE_URL = 'https://paper-api.alpaca.markets'
-    _ENV_LIVE_URL = ''
+    _ENV_LIVE_URL = 'https://api.alpaca.markets'
 
     @classmethod
     def getdata(cls, *args, **kwargs):
@@ -276,11 +286,11 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
 
     # Alpaca supported granularities
     _GRANULARITIES = {
-        (bt.TimeFrame.Minutes, 1): '1Min',
-        (bt.TimeFrame.Minutes, 5): '5Min',
+        (bt.TimeFrame.Minutes, 1):  '1Min',
+        (bt.TimeFrame.Minutes, 5):  '5Min',
         (bt.TimeFrame.Minutes, 15): '15Min',
         (bt.TimeFrame.Minutes, 60): '1H',
-        (bt.TimeFrame.Days, 1): '1D',
+        (bt.TimeFrame.Days, 1):     '1D',
     }
 
     def get_positions(self):
@@ -294,12 +304,13 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         # poslist = positions.get('positions', [])
         return positions
 
-    def get_granularity(self, timeframe, compression):
+    def get_granularity(self, timeframe, compression) -> Granularity:
+        if timeframe == bt.TimeFrame.Ticks:
+            return Granularity.Ticks
         if timeframe == bt.TimeFrame.Minutes:
-            return "minute"
+            return Granularity.Minute
         elif timeframe == bt.TimeFrame.Days:
-            return "day"
-        return None
+            return Granularity.Daily
 
     def get_instrument(self, dataname):
         try:
@@ -334,8 +345,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                             api_key=self.p.key_id,
                             api_secret=self.p.secret_key,
                             base_url=self.p.base_url,
-                            data_stream='polygon' if self.p.usePolygon else
-                            'alpacadatav1'
+                            data_url=os.environ.get("DATA_PROXY_WS", ''),
                             )
 
         streamer.run()
@@ -350,7 +360,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         :param timeframe: bt.TimeFrame
         :param compression: distance between samples. e.g if 1 =>
                  get sample every day. if 3 => get sample every 3 days
-        :param candleFormat: (bidask, midpoint, trades)
+        :param candleFormat: (bidask, midpoint, trades) - not used we get bars
         :param includeFirst:
         :return:
         """
@@ -375,84 +385,38 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
 
     def _t_candles(self, dataname, dtbegin, dtend, timeframe, compression,
                    candleFormat, includeFirst, q):
+        granularity: Granularity = self.get_granularity(timeframe, compression)
+        dtbegin, dtend = self._make_sure_dates_are_initialized_properly(
+            dtbegin, dtend, granularity)
 
-        granularity = self.get_granularity(timeframe, compression)
         if granularity is None:
-            e = AlpacaTimeFrameError()
+            e = AlpacaTimeFrameError('granularity is missing')
             q.put(e.error_response)
             return
+        try:
+            cdl = self.get_aggs_from_alpaca(dataname,
+                                            dtbegin,
+                                            dtend,
+                                            granularity,
+                                            compression)
+        except AlpacaError as e:
+            print(str(e))
+            q.put(e.error_response)
+            q.put(None)
+            return
+        except Exception:
+            traceback.print_exc()
+            q.put({'code': 'error'})
+            q.put(None)
+            return
 
-        dtkwargs = {'start': None, 'end': None}
-        if not dtend:
-            dtend = datetime.utcnow()
-        if not dtbegin:
-            days = 30 if 'd' in granularity else 3
-            delta = timedelta(days=days)
-            dtbegin = dtend - delta
-        dtkwargs['start'] = dtbegin
-        end_dt = None
-        dtkwargs['end'] = dtend
-        end_dt = dtend.isoformat()
-
-        cdl = pd.DataFrame()
-        prevdt = 0
-
-        while True:
-            try:
-                start_dt = None
-                if dtkwargs['start']:
-                    start_dt = dtkwargs['start'].isoformat()
-                if self.p.usePolygon:
-                    response = \
-                        self.oapi.polygon.historic_agg_v2(
-                            dataname,
-                            compression,
-                            granularity,
-                            _from=self.iso_date(start_dt),
-                            to=self.iso_date(end_dt))
-                else:
-                    response = self.oapi.get_aggs(dataname,
-                                                  compression,
-                                                  granularity,
-                                                  self.iso_date(start_dt),
-                                                  self.iso_date(end_dt))
-            except AlpacaError as e:
-                print(str(e))
-                q.put(e.error_response)
-                q.put(None)
-                return
-            except Exception as e:
-                print(str(e))
-                q.put({'code': 'error'})
-                q.put(None)
-                return
-
-            # No result from the server, most likely error
-            if response.df.shape[0] == 0:
-                print(response)
-                q.put({'code': 'error'})
-                q.put(None)
-                return
-            temp = response.df
-            cdl.update(temp)
-            cdl = pd.concat([cdl, temp])
-            cdl = cdl[~cdl.index.duplicated()]
-            prevdt = dtkwargs['start']
-            dtkwargs['start'] = cdl.index[-1].to_pydatetime()
-
-            if prevdt == dtkwargs['start']:  # end of the data
-                break
-
-        freq = str(compression) + ('D' if 'd' in granularity else 'T')
-
-        cdl = cdl.resample(freq).agg({'open': 'first',
-                                      'high': 'max',
-                                      'low': 'min',
-                                      'close': 'last',
-                                      'volume': 'sum'})
+        # don't use dt.replace. use localize
+        # (https://stackoverflow.com/a/1592837/2739124)
         cdl = cdl.loc[
-              dtbegin.replace(tzinfo=pytz.timezone(NY)):
-              dtend.replace(tzinfo=pytz.timezone(NY))
+              pytz.timezone(NY).localize(dtbegin) if
+              not dtbegin.tzname() else dtbegin:
+              pytz.timezone(NY).localize(dtend) if
+              not dtend.tzname() else dtend
               ].dropna(subset=['high'])
         records = cdl.reset_index().to_dict('records')
         for r in records:
@@ -460,25 +424,210 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
             q.put(r)
         q.put({})  # end of transmission
 
-    def streaming_prices(self, dataname, tmout=None):
+    def _make_sure_dates_are_initialized_properly(self, dtbegin, dtend,
+                                                  granularity):
+        """
+        dates may or may not be specified by the user.
+        when they do, they are probably don't include NY timezome data
+        also, when granularity is minute, we want to make sure we get data when
+        market is opened. so if it doesn't - let's set end date to be last
+        known minute with opened market.
+        this nethod takes care of all these issues.
+        :param dtbegin:
+        :param dtend:
+        :param granularity:
+        :return:
+        """
+        if not dtend:
+            dtend = pd.Timestamp('now', tz=NY)
+        else:
+            dtend = pd.Timestamp(pytz.timezone('UTC').localize(dtend)) if \
+              not dtend.tzname() else dtend
+        if granularity == Granularity.Minute:
+            calendar = exchange_calendars.get_calendar(name='NYSE')
+            while not calendar.is_open_on_minute(dtend.ceil(freq='T')):
+                dtend = dtend.replace(hour=15,
+                                      minute=59,
+                                      second=0,
+                                      microsecond=0)
+                dtend -= timedelta(days=1)
+        if not dtbegin:
+            days = 30 if granularity == Granularity.Daily else 3
+            delta = timedelta(days=days)
+            dtbegin = dtend - delta
+        else:
+            dtbegin = pd.Timestamp(pytz.timezone('UTC').localize(dtbegin)) if \
+              not dtbegin.tzname() else dtbegin
+        while dtbegin > dtend:
+            # if we start the script during market hours we could get this
+            # situation. this resolves that.
+            dtbegin -= timedelta(days=1)
+        return dtbegin.astimezone(NY), dtend.astimezone(NY)
+
+    def get_aggs_from_alpaca(self,
+                             dataname,
+                             start,
+                             end,
+                             granularity: Granularity,
+                             compression):
+        """
+        https://alpaca.markets/docs/api-documentation/api-v2/market-data/bars/
+        Alpaca API as a limit of 1000 records per api call. meaning, we need to
+        do multiple calls to get all the required data if the date range is
+        large.
+        also, the alpaca api does not support compression (or, you can't get
+        5 minute bars e.g) so we need to resample the received bars.
+        also, we need to drop out of market records.
+        this function does all of that.
+
+        note:
+        this was the old way of getting the data
+          response = self.oapi.get_aggs(dataname,
+                                        compression,
+                                        granularity,
+                                        self.iso_date(start_dt),
+                                        self.iso_date(end_dt))
+          the thing is get_aggs work nicely for days but not for minutes, and
+          it is not a documented API. barset on the other hand does
+          but we need to manipulate it to be able to work with it
+          smoothly
+        """
+
+        def _granularity_to_timeframe(granularity):
+            if granularity in [Granularity.Minute, Granularity.Ticks]:
+                timeframe = TimeFrame.Minute
+            elif granularity == Granularity.Daily:
+                timeframe = TimeFrame.Day
+            elif granularity == 'ticks':
+                timeframe = "minute"
+            else:
+                # default to day if not configured properly. subject to
+                # change.
+                timeframe = TimeFrame.Day
+            return timeframe
+
+        def _iterate_api_calls():
+            """
+            you could get max 1000 samples from the server. if we need more
+            than that we need to do several api calls.
+
+            currently the alpaca api supports also 5Min and 15Min so we could
+            optimize server communication time by addressing timeframes
+            """
+            got_all = False
+            curr = end
+            response = pd.DataFrame()
+            while not got_all:
+                timeframe = _granularity_to_timeframe(granularity)
+                r = self.oapi.get_bars(dataname,
+                                       timeframe,
+                                       start.isoformat(),
+                                       curr.isoformat())
+                if r:
+                    earliest_sample = r[0].t
+                    response = pd.concat([r.df, response], axis=0)
+                    if earliest_sample <= (pytz.timezone(NY).localize(
+                            start) if not start.tzname() else start):
+                        got_all = True
+                    else:
+                        delta = timedelta(days=1) if granularity == "day" \
+                            else timedelta(minutes=1)
+                        curr = earliest_sample - delta
+                else:
+                    # no more data is available, let's return what we have
+                    break
+            return response
+
+        def _clear_out_of_market_hours(df):
+            """
+            only interested in samples between 9:30, 16:00 NY time
+            """
+            return df.between_time("09:30", "16:00")
+
+        def _drop_early_samples(df):
+            """
+            samples from server don't start at 9:30 NY time
+            let's drop earliest samples
+            """
+            for i, b in df.iterrows():
+                if i.time() >= dtime(9, 30):
+                    return df[i:]
+
+        def _resample(df):
+            """
+            samples returned with certain window size (1 day, 1 minute) user
+            may want to work with different window size (5min)
+            """
+
+            if granularity == Granularity.Minute:
+                sample_size = f"{compression}Min"
+            else:
+                sample_size = f"{compression}D"
+            df = df.resample(sample_size).agg(
+                collections.OrderedDict([
+                    ('open', 'first'),
+                    ('high', 'max'),
+                    ('low', 'min'),
+                    ('close', 'last'),
+                    ('volume', 'sum'),
+                ])
+            )
+            if granularity == Granularity.Minute:
+                return df.between_time("09:30", "16:00")
+            else:
+                return df
+
+        if not start:
+            timeframe = _granularity_to_timeframe(granularity)
+            start = end - timedelta(days=1)
+            response = self.oapi.get_bars(dataname,
+                                          timeframe, start, end)._raw
+        else:
+            response = _iterate_api_calls()
+        cdl = response
+        if granularity == Granularity.Minute:
+            cdl = _clear_out_of_market_hours(cdl)
+            cdl = _drop_early_samples(cdl)
+        if compression != 1:
+            response = _resample(cdl)
+        else:
+            response = cdl
+        response = response.dropna()
+        response = response[~response.index.duplicated()]
+        return response
+
+    def streaming_prices(self,
+                         dataname, timeframe, tmout=None, data_feed='iex'):
         q = queue.Queue()
-        kwargs = {'q': q, 'dataname': dataname, 'tmout': tmout}
+        kwargs = {'q':         q,
+                  'dataname':  dataname,
+                  'timeframe': timeframe,
+                  'data_feed': data_feed,
+                  'tmout':     tmout}
         t = threading.Thread(target=self._t_streaming_prices, kwargs=kwargs)
         t.daemon = True
         t.start()
         return q
 
-    def _t_streaming_prices(self, dataname, q, tmout):
+    def _t_streaming_prices(self, dataname, timeframe, q, tmout, data_feed):
         if tmout is not None:
             _time.sleep(tmout)
+
+        if timeframe == bt.TimeFrame.Ticks:
+            method = StreamingMethod.Quote
+        elif timeframe == bt.TimeFrame.Minutes:
+            method = StreamingMethod.MinuteAgg
+        else:
+            method = StreamingMethod.MinuteAgg
+
         streamer = Streamer(q,
                             api_key=self.p.key_id,
                             api_secret=self.p.secret_key,
                             instrument=dataname,
-                            method='quote',
+                            method=method,
                             base_url=self.p.base_url,
-                            data_stream='polygon' if self.p.usePolygon else
-                            'alpacadatav1')
+                            data_url=os.environ.get("DATA_PROXY_WS", ''),
+                            data_feed=data_feed)
 
         streamer.run()
 
@@ -489,10 +638,11 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         return self._value
 
     _ORDEREXECS = {
-        bt.Order.Market: 'market',
-        bt.Order.Limit: 'limit',
-        bt.Order.Stop: 'stop',
+        bt.Order.Market:    'market',
+        bt.Order.Limit:     'limit',
+        bt.Order.Stop:      'stop',
         bt.Order.StopLimit: 'stop_limit',
+        bt.Order.StopTrail: 'trailing_stop',
     }
 
     def broker_threads(self):
@@ -550,7 +700,8 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         okwargs['side'] = 'buy' if order.isbuy() else 'sell'
         okwargs['type'] = self._ORDEREXECS[order.exectype]
         okwargs['time_in_force'] = "gtc"
-        if order.exectype != bt.Order.Market:
+        if order.exectype not in [bt.Order.Market, bt.Order.StopTrail,
+                                  bt.Order.Stop]:
             okwargs['limit_price'] = str(order.created.price)
 
         if order.exectype in [bt.Order.StopLimit, bt.Order.Stop]:
@@ -569,53 +720,80 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         if stopside or takeside:
             okwargs['order_class'] = "bracket"
 
-        okwargs.update(**kwargs)  # anything from the user
+        if order.exectype == bt.Order.StopTrail:
+            if order.trailpercent and order.trailamount:
+                raise Exception("You can't create trailing stop order with "
+                                "both TrailPrice and TrailPercent. choose one")
+            if order.trailpercent:
+                okwargs['trail_percent'] = order.trailpercent
+            elif order.trailamount:
+                okwargs['trail_price'] = order.trailamount
+            else:
+                raise Exception("You must provide either trailpercent or "
+                                "trailamount when creating StopTrail order")
+
+        # anything from the user
+        okwargs.update(order.info)
+        okwargs.update(**kwargs)
 
         self.q_ordercreate.put((order.ref, okwargs,))
         return order
 
     def _t_order_create(self):
+        def _check_if_transaction_occurred(order_id):
+            # a transaction may have happened and was stored. if so let's
+            # process it
+            tpending = self._transpend[order_id]
+            tpending.append(None)  # eom marker
+            while True:
+                trans = tpending.popleft()
+                if trans is None:
+                    break
+                self._process_transaction(order_id, trans)
+
         while True:
             try:
-                # if self.q_ordercreate.empty():
-                #     continue
+                if self.q_ordercreate.empty():
+                    continue
                 msg = self.q_ordercreate.get()
                 if msg is None:
-                    break
-
+                    continue
                 oref, okwargs = msg
                 try:
                     o = self.oapi.submit_order(**okwargs)
                 except Exception as e:
                     self.put_notification(e)
                     self.broker._reject(oref)
-                    return
+                    continue
                 try:
                     oid = o.id
                 except Exception:
                     if 'code' in o._raw:
-                        self.put_notification(o.message)
+                        self.put_notification(f"error submitting order "
+                                              f"code: {o.code}. msg: "
+                                              f"{o.message}")
                     else:
                         self.put_notification(
                             "General error from the Alpaca server")
                     self.broker._reject(oref)
-                    return
+                    continue
 
-                self._orders[oref] = oid
-                self.broker._submit(oref)
                 if okwargs['type'] == 'market':
                     self.broker._accept(oref)  # taken immediately
 
+                self._orders[oref] = oid
                 self._ordersrev[oid] = oref  # maps ids to backtrader order
+                _check_if_transaction_occurred(oid)
+                if o.legs:
+                    index = 1
+                    for leg in o.legs:
+                        self._orders[oref + index] = leg.id
+                        self._ordersrev[leg.id] = oref + index
+                        _check_if_transaction_occurred(leg.id)
+                self.broker._submit(oref)  # inside it submits the legs too
+                if okwargs['type'] == 'market':
+                    self.broker._accept(oref)  # taken immediately
 
-                # An transaction may have happened and was stored
-                tpending = self._transpend[oid]
-                tpending.append(None)  # eom marker
-                while True:
-                    trans = tpending.popleft()
-                    if trans is None:
-                        break
-                    self._process_transaction(oid, trans)
             except Exception as e:
                 print(str(e))
 
@@ -660,7 +838,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
             self._transpend[oid].append(trans)
         self._process_transaction(oid, trans)
 
-    _X_ORDER_FILLED = ('partially_filled', 'filled', )
+    _X_ORDER_FILLED = ('partially_filled', 'filled',)
 
     def _process_transaction(self, oid, trans):
         try:

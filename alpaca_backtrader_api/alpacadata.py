@@ -1,11 +1,12 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-from datetime import datetime, timedelta
-
+from datetime import timedelta
+import pandas as pd
 from backtrader.feed import DataBase
 from backtrader import date2num, num2date
 from backtrader.utils.py3 import queue, with_metaclass
+import backtrader as bt
 
 from alpaca_backtrader_api import alpacastore
 
@@ -62,7 +63,8 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
         backfilling from IB will take place. This is ideally meant to backfill
         from already stored sources like a file on disk, but not limited to.
 
-      - ``bidask`` (default: ``True``)
+      - ``bidask`` (default: ``True``) - THIS IS NOT USED. WE GET BARS NOT
+                                         QUOTES/TICKS FOR HISTORIC PRICES
 
         If ``True``, then the historical/backfilling requests will request
         bid/ask prices from the server
@@ -131,6 +133,7 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
         ('reconnect', True),
         ('reconnections', -1),  # forever
         ('reconntimeout', 5.0),
+        ('data_feed', 'iex'),  # options iex/sip for pro
     )
 
     _store = alpacastore.AlpacaStore
@@ -154,7 +157,13 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
     def __init__(self, **kwargs):
         self.o = self._store(**kwargs)
         self._candleFormat = 'bidask' if self.p.bidask else 'midpoint'
+        self._timeframe = self.p.timeframe
         self.do_qcheck(True, 0)
+        if self._timeframe not in [bt.TimeFrame.Ticks,
+                                   bt.TimeFrame.Minutes,
+                                   bt.TimeFrame.Days]:
+            raise Exception(f'Unsupported time frame: '
+                            f'{bt.TimeFrame.TName(self._timeframe)}')
 
     def setenvironment(self, env):
         """
@@ -223,7 +232,10 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
 
             self._state = self._ST_HISTORBACK
             return True
-        self.qlive = self.o.streaming_prices(self.p.dataname, tmout=tmout)
+        self.qlive = self.o.streaming_prices(self.p.dataname,
+                                             self.p.timeframe,
+                                             tmout=tmout,
+                                             data_feed=self.p.data_feed)
         if instart:
             self._statelivereconn = self.p.backfill_start
         else:
@@ -298,8 +310,13 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
                     if self._laststatus != self.LIVE:
                         if self.qlive.qsize() <= 1:  # very short live queue
                             self.put_notification(self.LIVE)
-
-                    ret = self._load_tick(msg)
+                    if self.p.timeframe == bt.TimeFrame.Ticks:
+                        ret = self._load_tick(msg)
+                    elif self.p.timeframe == bt.TimeFrame.Minutes:
+                        ret = self._load_agg(msg)
+                    else:
+                        # might want to act differently in the future
+                        ret = self._load_agg(msg)
                     if ret:
                         return True
 
@@ -323,7 +340,7 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
                     # passing None to fetch max possible in 1 request
                     dtbegin = None
 
-                dtend = datetime.utcfromtimestamp(int(msg['time']))
+                dtend = pd.Timestamp(msg['time'], unit='ns')
 
                 self.qhist = self.o.candles(
                     self.p.dataname, dtbegin, dtend,
@@ -386,7 +403,7 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
                     return False
 
     def _load_tick(self, msg):
-        dtobj = datetime.utcfromtimestamp(int(msg['time']))
+        dtobj = pd.Timestamp(msg['time'], unit='ns')
         dt = date2num(dtobj)
         if dt <= self.lines.datetime[-1]:
             return False  # time already seen
@@ -398,13 +415,28 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
 
         # Put the prices into the bar
         tick = float(
-            msg['askprice']) if self.p.useask else float(
-            msg['bidprice'])
+            msg['ask_price']) if self.p.useask else float(
+            msg['bid_price'])
         self.lines.open[0] = tick
         self.lines.high[0] = tick
         self.lines.low[0] = tick
         self.lines.close[0] = tick
         self.lines.volume[0] = 0.0
+        self.lines.openinterest[0] = 0.0
+
+        return True
+
+    def _load_agg(self, msg):
+        dtobj = pd.Timestamp(msg['time'], unit='ns')
+        dt = date2num(dtobj)
+        if dt <= self.lines.datetime[-1]:
+            return False  # time already seen
+        self.lines.datetime[0] = dt
+        self.lines.open[0] = msg['open']
+        self.lines.high[0] = msg['high']
+        self.lines.low[0] = msg['low']
+        self.lines.close[0] = msg['close']
+        self.lines.volume[0] = msg['volume']
         self.lines.openinterest[0] = 0.0
 
         return True

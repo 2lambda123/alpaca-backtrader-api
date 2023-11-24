@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import ast
+import os
 import re
 from setuptools import setup
 
@@ -13,6 +14,12 @@ with open('alpaca_backtrader_api/__init__.py', 'rb') as f:
 with open('README.md') as readme_file:
     README = readme_file.read()
 
+with open(os.path.join("requirements", "requirements.txt")) as reqs:
+    REQUIREMENTS = reqs.readlines()
+
+with open(os.path.join("requirements", "requirements_test.txt")) as reqs:
+    REQUIREMENTS_TEST = reqs.readlines()
+
 setup(
     name='alpaca-backtrader-api',
     version=version,
@@ -22,19 +29,18 @@ setup(
     author='Alpaca',
     author_email='oss@alpaca.markets',
     url='https://github.com/alpacahq/alpaca-backtrader-api',
+    classifiers=[
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
+
+        # Operating Systems on which it runs
+        'Operating System :: OS Independent',
+    ],
     keywords='financial,timeseries,api,trade,backtrader',
     packages=['alpaca_backtrader_api'],
-    install_requires=[
-        'backtrader',
-        'alpaca-trade-api==0.48',
-    ],
-    tests_require=[
-        'pytest',
-        'pytest-cov',
-        'requests-mock',
-        'coverage>=4.4.1',
-        'mock>=1.0.1',
-        'flake8',
-    ],
+    install_requires=REQUIREMENTS,
+    tests_require=REQUIREMENTS_TEST,
     setup_requires=['pytest-runner', 'flake8'],
 )

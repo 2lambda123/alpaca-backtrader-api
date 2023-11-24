@@ -1,6 +1,8 @@
 [![PyPI version](https://badge.fury.io/py/alpaca-backtrader-api.svg)](https://badge.fury.io/py/alpaca-backtrader-api)
 [![PyPI download month](https://img.shields.io/pypi/dm/alpaca-backtrader-api.svg)](https://pypi.python.org/pypi/alpaca-backtrader-api/)
 [![CircleCI](https://circleci.com/gh/alpacahq/alpaca-backtrader-api.svg?style=shield)](https://circleci.com/gh/alpacahq/alpaca-backtrader-api)
+[![Updates](https://pyup.io/repos/github/alpacahq/alpaca-backtrader-api/shield.svg)](https://pyup.io/repos/github/alpacahq/alpaca-backtrader-api/)
+[![Python 3](https://pyup.io/repos/github/alpacahq/alpaca-backtrader-api/python-3-shield.svg)](https://pyup.io/repos/github/alpacahq/alpaca-backtrader-api/)
 
 # alpaca-backtrader-api
 
@@ -89,6 +91,15 @@ using 'key_id' and 'secret_key'.
 
 The 'paper' parameter is default to False, which allows live trading.
 If you set it to True, then you are in the paper trading mode.
+
+## Running Multiple Strategies/Datas
+There's a way to execute an algorithm with multiple datas or/and execute more than one algorithm.<br>
+The websocket connection is limited to 1 connection per account. Alpaca backtrader opens a websocket connection for each data you define.<br>
+For that exact purpose this ![project](https://github.com/shlomikushchi/alpaca-proxy-agent)  was created<br>
+The steps to execute this are:
+* Run the Alpaca Proxy Agent as described in the project's README
+* Define this env variable: `DATA_PROXY_WS` to be the address of the proxy agent. (e.g: `DATA_PROXY_WS=ws://192.168.99.100:8765`)
+* execute your algorithm. it will connect to the servers through the proxy agent allowing you to execute multiple datas/strategies
 
 ## Support and Contribution
 
