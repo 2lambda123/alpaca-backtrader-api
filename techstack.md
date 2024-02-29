@@ -3,12 +3,12 @@
 ## Tech Stack
 2lambda123/alpaca-backtrader-api is built on the following main stack:
 
-- [CircleCI](https://circleci.com/) – Continuous Integration
 - [Python](https://www.python.org) – Languages
-- [NumPy](http://www.numpy.org/) – Data Science Tools
 - [Matplotlib](http://matplotlib.org) – Charting Libraries
-- [pytest](http://pytest.org/latest/) – Testing Frameworks
+- [CircleCI](https://circleci.com/) – Continuous Integration
 - [flake8](https://github.com/PyCQA/flake8) – Code Review
+- [pytest](http://pytest.org/latest/) – Testing Frameworks
+- [NumPy](http://www.numpy.org/) – Data Science Tools
 
 Full tech stack [here](/techstack.md)
 
@@ -18,12 +18,12 @@ Full tech stack [here](/techstack.md)
 ## Tech Stack
 2lambda123/alpaca-backtrader-api is built on the following main stack:
 
-- <img width='25' height='25' src='https://img.stackshare.io/service/190/CvqrSSFs_400x400.jpg' alt='CircleCI'/> [CircleCI](https://circleci.com/) – Continuous Integration
 - <img width='25' height='25' src='https://img.stackshare.io/service/993/pUBY5pVj.png' alt='Python'/> [Python](https://www.python.org) – Languages
-- <img width='25' height='25' src='https://img.stackshare.io/service/2179/default_332f874a2edb2686f578aa6389313efcea1eec41.png' alt='NumPy'/> [NumPy](http://www.numpy.org/) – Data Science Tools
 - <img width='25' height='25' src='https://img.stackshare.io/service/2993/2DZC4KaA_400x400.jpg' alt='Matplotlib'/> [Matplotlib](http://matplotlib.org) – Charting Libraries
-- <img width='25' height='25' src='https://img.stackshare.io/service/4586/Lu99Qe0Z_400x400.png' alt='pytest'/> [pytest](http://pytest.org/latest/) – Testing Frameworks
+- <img width='25' height='25' src='https://img.stackshare.io/service/190/CvqrSSFs_400x400.jpg' alt='CircleCI'/> [CircleCI](https://circleci.com/) – Continuous Integration
 - <img width='25' height='25' src='https://img.stackshare.io/service/4838/default_c37162891c64eca7fafe782d9c191e409aae1e93.png' alt='flake8'/> [flake8](https://github.com/PyCQA/flake8) – Code Review
+- <img width='25' height='25' src='https://img.stackshare.io/service/4586/Lu99Qe0Z_400x400.png' alt='pytest'/> [pytest](http://pytest.org/latest/) – Testing Frameworks
+- <img width='25' height='25' src='https://img.stackshare.io/service/2179/default_332f874a2edb2686f578aa6389313efcea1eec41.png' alt='NumPy'/> [NumPy](http://www.numpy.org/) – Data Science Tools
 
 Full tech stack [here](/techstack.md)
 
@@ -34,7 +34,7 @@ Full tech stack [here](/techstack.md)
 # Tech Stack File
 ![](https://img.stackshare.io/repo.svg "repo") [2lambda123/alpaca-backtrader-api](https://github.com/2lambda123/alpaca-backtrader-api)![](https://img.stackshare.io/public_badge.svg "public")
 <br/><br/>
-|14<br/>Tools used|01/09/24 <br/>Report generated|
+|14<br/>Tools used|02/29/24 <br/>Report generated|
 |------|------|
 </div>
 
